@@ -30,6 +30,7 @@ import com.cappielloantonio.tempo.R;
 import com.cappielloantonio.tempo.databinding.FragmentSongListPageBinding;
 import com.cappielloantonio.tempo.helper.recyclerview.PaginationScrollListener;
 import com.cappielloantonio.tempo.interfaces.ClickCallback;
+import com.cappielloantonio.tempo.repository.SongRepository;
 import com.cappielloantonio.tempo.service.MediaManager;
 import com.cappielloantonio.tempo.service.MediaService;
 import com.cappielloantonio.tempo.subsonic.models.Child;
@@ -39,6 +40,7 @@ import com.cappielloantonio.tempo.util.Constants;
 import com.cappielloantonio.tempo.viewmodel.SongListPageViewModel;
 import com.google.common.util.concurrent.ListenableFuture;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
@@ -97,7 +99,11 @@ public class SongListPageFragment extends Fragment implements ClickCallback {
     }
 
     private void init() {
-        if (requireArguments().getString(Constants.MEDIA_RECENTLY_PLAYED) != null) {
+        if (requireArguments().getString(Constants.MEDIA_ALL_SONGS) != null) {
+            songListPageViewModel.title = Constants.MEDIA_ALL_SONGS;
+            songListPageViewModel.toolbarTitle = getString(R.string.song_list_page_all_songs);
+            bind.pageTitleLabel.setText(R.string.song_list_page_all_songs);
+        } else if (requireArguments().getString(Constants.MEDIA_RECENTLY_PLAYED) != null) {
             songListPageViewModel.title = Constants.MEDIA_RECENTLY_PLAYED;
             songListPageViewModel.toolbarTitle = getString(R.string.song_list_page_recently_played);
             bind.pageTitleLabel.setText(R.string.song_list_page_recently_played);
@@ -176,8 +182,13 @@ public class SongListPageFragment extends Fragment implements ClickCallback {
                 setSongListPageSorter();
 
                 bind.songListShuffleImageView.setOnClickListener(v -> {
-                    Collections.shuffle(songs);
-                    MediaManager.startQueue(mediaBrowserListenableFuture, songs.subList(0, Math.min(25, songs.size())), 0);
+                    List<Child> currentSongs = songListPageViewModel.getCurrentSongList();
+
+                    if (currentSongs == null || currentSongs.isEmpty()) return;
+
+                    List<Child> shuffledSongs = new ArrayList<>(currentSongs);
+                    Collections.shuffle(shuffledSongs);
+                    MediaManager.startQueue(mediaBrowserListenableFuture, shuffledSongs.subList(0, Math.min(25, shuffledSongs.size())), 0);
                     activity.setBottomSheetInPeek(true);
                 });
             }
@@ -186,6 +197,8 @@ public class SongListPageFragment extends Fragment implements ClickCallback {
 
     @SuppressLint("ClickableViewAccessibility")
     private void initSongListView() {
+        isLoading = true;
+
         bind.songListRecyclerView.setLayoutManager(new LinearLayoutManager(requireContext()));
         bind.songListRecyclerView.setHasFixedSize(true);
 
@@ -194,7 +207,13 @@ public class SongListPageFragment extends Fragment implements ClickCallback {
         songListPageViewModel.getSongList().observe(getViewLifecycleOwner(), songs -> {
             isLoading = false;
             songHorizontalAdapter.setItems(songs);
-            setSongListPageSubtitle(songs);
+            // A null value means the request failed (see SongRepository.getAllSongs). The subtitle
+            // helper dereferences its argument, so it gets an empty list instead of null.
+            setSongListPageSubtitle(songs != null ? songs : new ArrayList<>());
+
+            if (bind != null) {
+                bind.songListShuffleImageView.setEnabled(songs != null && !songs.isEmpty());
+            }
         });
 
         bind.songListRecyclerView.addOnScrollListener(new PaginationScrollListener((LinearLayoutManager) bind.songListRecyclerView.getLayoutManager()) {
@@ -272,6 +291,13 @@ public class SongListPageFragment extends Fragment implements ClickCallback {
 
     private void setSongListPageSubtitle(List<Child> children) {
         switch (songListPageViewModel.title) {
+            case Constants.MEDIA_ALL_SONGS:
+                boolean knownCount = children.size() < SongRepository.ALL_SONGS_PAGE_SIZE || !songListPageViewModel.hasMoreAllSongs();
+
+                bind.pageSubtitleLabel.setText(knownCount ?
+                        getString(R.string.generic_list_page_count, children.size()) :
+                        getString(R.string.generic_list_page_count_unknown, children.size()));
+                break;
             case Constants.MEDIA_BY_GENRE:
                 bind.pageSubtitleLabel.setText(children.size() < songListPageViewModel.maxNumberByGenre ?
                         getString(R.string.generic_list_page_count, children.size()) :
@@ -296,6 +322,7 @@ public class SongListPageFragment extends Fragment implements ClickCallback {
         switch (songListPageViewModel.title) {
             case Constants.MEDIA_BY_GENRE:
             case Constants.MEDIA_BY_YEAR:
+            case Constants.MEDIA_ALL_SONGS:
                 bind.songListSortImageView.setVisibility(View.GONE);
                 break;
             case Constants.MEDIA_BY_ARTIST:

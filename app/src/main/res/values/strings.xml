@@ -144,6 +144,7 @@
     <string name="home_option_reorganize">Reorganize</string>
     <string name="label_dot_separator" translatable="false">•</string>
     <string name="label_placeholder" translatable="false">--</string>
+    <string name="library_title_all_songs">All songs</string>
     <string name="library_title_album">Albums</string>
     <string name="library_title_album_see_all_button">See all</string>
     <string name="library_title_artist">Artists</string>
@@ -370,6 +371,7 @@
     <string name="song_bottom_sheet_rate">Rate</string>
     <string name="song_bottom_sheet_remove">Remove</string>
     <string name="song_bottom_sheet_share">Share</string>
+    <string name="song_list_page_all_songs">All songs</string>
     <string name="song_list_page_downloaded">Downloaded</string>
     <string name="song_list_page_most_played">Most played tracks</string>
     <string name="song_list_page_recently_added">Recently added tracks</string>

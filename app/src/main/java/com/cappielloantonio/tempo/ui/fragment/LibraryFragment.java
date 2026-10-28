@@ -120,6 +120,12 @@ public class LibraryFragment extends Fragment implements ClickCallback {
             libraryViewModel.refreshPlaylistSample(getViewLifecycleOwner());
             return true;
         });
+
+        bind.libraryAllSongsSector.setOnClickListener(v -> {
+            Bundle bundle = new Bundle();
+            bundle.putString(Constants.MEDIA_ALL_SONGS, Constants.MEDIA_ALL_SONGS);
+            activity.navController.navigate(R.id.action_libraryFragment_to_songListPageFragment, bundle);
+        });
     }
 
     private void initAppBar() {

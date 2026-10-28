@@ -123,6 +123,7 @@
     <string name="home_title_top_songs">你最喜欢的歌曲</string>
     <string name="label_dot_separator" translatable="false">•</string>
     <string name="label_placeholder" translatable="false">--</string>
+    <string name="library_title_all_songs">所有歌曲</string>
     <string name="library_title_album">专辑</string>
     <string name="library_title_album_see_all_button">查看全部</string>
     <string name="library_title_artist">艺术家</string>
@@ -336,6 +337,7 @@
     <string name="song_bottom_sheet_rate">评分</string>
     <string name="song_bottom_sheet_remove">移除</string>
     <string name="song_bottom_sheet_share">分享</string>
+    <string name="song_list_page_all_songs">所有歌曲</string>
     <string name="song_list_page_downloaded">已下载</string>
     <string name="song_list_page_most_played">最常播放的曲目</string>
     <string name="song_list_page_recently_added">最近添加的曲目</string>

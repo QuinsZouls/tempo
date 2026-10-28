@@ -1,11 +1,14 @@
 package com.cappielloantonio.tempo.repository;
 
+import android.util.Log;
+
 import androidx.annotation.NonNull;
 import androidx.lifecycle.MutableLiveData;
 
 import com.cappielloantonio.tempo.App;
 import com.cappielloantonio.tempo.subsonic.base.ApiResponse;
 import com.cappielloantonio.tempo.subsonic.models.Child;
+import com.cappielloantonio.tempo.subsonic.models.ResponseStatus;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -17,6 +20,8 @@ import retrofit2.Response;
 
 public class SongRepository {
     private static final String TAG = "SongRepository";
+
+    public static final int ALL_SONGS_PAGE_SIZE = 500;
 
     public MutableLiveData<List<Child>> getStarredSongs(boolean random, int size) {
         MutableLiveData<List<Child>> starredSongs = new MutableLiveData<>(Collections.emptyList());
@@ -132,6 +137,56 @@ public class SongRepository {
 
                     }
                 });
+    }
+
+    /**
+     * Loads a page of the whole song library.
+     *
+     * The returned LiveData has no initial value. Its value is {@code null} when the request failed
+     * (network error or a server-side error, e.g. a server that does not support an empty search3
+     * query) and a mutable list when the server answered. An empty list means "no more songs".
+     *
+     * @param offset absolute row offset, i.e. the number of songs already loaded
+     */
+    public MutableLiveData<List<Child>> getAllSongs(int offset) {
+        // No initial value: an empty value would let SongListPageFragment observers clear
+        // isLoading right away, triggering a premature loadMoreItems() that re-requests
+        // the first page while the first request is still in flight (duplicated songs).
+        MutableLiveData<List<Child>> allSongs = new MutableLiveData<>();
+
+        App.getSubsonicClientInstance(false)
+                .getSearchingClient()
+                .search3("", ALL_SONGS_PAGE_SIZE, offset, 0, 0)
+                .enqueue(new Callback<ApiResponse>() {
+                    @Override
+                    public void onResponse(@NonNull Call<ApiResponse> call, @NonNull Response<ApiResponse> response) {
+                        if (!response.isSuccessful() || response.body() == null || response.body().getSubsonicResponse() == null || ResponseStatus.FAILED.equals(response.body().getSubsonicResponse().getStatus())) {
+                            Log.e(TAG, "getAllSongs(offset=" + offset + ") failed with code " + response.code());
+                            allSongs.setValue(null);
+                            return;
+                        }
+
+                        List<Child> songs = new ArrayList<>();
+
+                        if (response.body().getSubsonicResponse().getSearchResult3() != null && response.body().getSubsonicResponse().getSearchResult3().getSongs() != null) {
+                            songs.addAll(response.body().getSubsonicResponse().getSearchResult3().getSongs());
+                        }
+
+                        if (songs.isEmpty()) {
+                            Log.d(TAG, "getAllSongs(offset=" + offset + "): empty song list");
+                        }
+
+                        allSongs.setValue(songs);
+                    }
+
+                    @Override
+                    public void onFailure(@NonNull Call<ApiResponse> call, @NonNull Throwable t) {
+                        Log.e(TAG, "getAllSongs(offset=" + offset + ") failed", t);
+                        allSongs.setValue(null);
+                    }
+                });
+
+        return allSongs;
     }
 
     public MutableLiveData<List<Child>> getSongsByGenre(String id, int page) {

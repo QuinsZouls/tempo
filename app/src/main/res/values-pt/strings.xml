@@ -120,6 +120,7 @@
     <string name="home_title_starred_tracks">★ Músicas favoritas</string>
     <string name="home_title_starred_tracks_see_all_button">Ver todos</string>
     <string name="home_title_top_songs">Suas músicas mais ouvidas</string>
+    <string name="library_title_all_songs">Todas as músicas</string>
     <string name="library_title_album">Álbuns</string>
     <string name="library_title_album_see_all_button">Ver todos</string>
     <string name="library_title_artist">Artistas</string>
@@ -323,6 +324,7 @@
     <string name="song_bottom_sheet_rate">Avaliar</string>
     <string name="song_bottom_sheet_remove">Remover</string>
     <string name="song_bottom_sheet_share">Compartilhar</string>
+    <string name="song_list_page_all_songs">Todas as músicas</string>
     <string name="song_list_page_downloaded">Baixados</string>
     <string name="song_list_page_most_played">Músicas mais reproduzidas</string>
     <string name="song_list_page_recently_added">Músicas recém-adicionadas</string>

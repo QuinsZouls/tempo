@@ -121,6 +121,7 @@
     <string name="home_title_top_songs">자주 플레이한 음악</string>
     <string name="label_dot_separator" translatable="false">•</string>
     <string name="label_placeholder" translatable="false">--</string>
+    <string name="library_title_all_songs">모든 곡</string>
     <string name="library_title_album">앨범</string>
     <string name="library_title_album_see_all_button">모두 보기</string>
     <string name="library_title_artist">아티스트</string>
@@ -324,6 +325,7 @@
     <string name="song_bottom_sheet_rate">별점</string>
     <string name="song_bottom_sheet_remove">제거</string>
     <string name="song_bottom_sheet_share">공유</string>
+    <string name="song_list_page_all_songs">모든 곡</string>
     <string name="song_list_page_downloaded">다운로드됨</string>
     <string name="song_list_page_most_played">가장 많이 재생한 트랙</string>
     <string name="song_list_page_recently_added">최근 추가한 트랙</string>

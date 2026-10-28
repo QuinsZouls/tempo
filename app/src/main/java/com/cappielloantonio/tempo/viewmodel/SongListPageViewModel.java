@@ -18,7 +18,9 @@ import com.cappielloantonio.tempo.subsonic.models.Genre;
 import com.cappielloantonio.tempo.util.Constants;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 public class SongListPageViewModel extends AndroidViewModel {
     private final SongRepository songRepository;
@@ -31,6 +33,9 @@ public class SongListPageViewModel extends AndroidViewModel {
     public AlbumID3 album;
 
     private MutableLiveData<List<Child>> songList;
+
+    private boolean hasMoreAllSongs = false;
+    private int allSongsServerOffset = 0;
 
     public ArrayList<String> filters = new ArrayList<>();
     public ArrayList<String> filterNames = new ArrayList<>();
@@ -65,6 +70,11 @@ public class SongListPageViewModel extends AndroidViewModel {
             case Constants.MEDIA_STARRED:
                 songList = songRepository.getStarredSongs(false, -1);
                 break;
+            case Constants.MEDIA_ALL_SONGS:
+                allSongsServerOffset = 0;
+                hasMoreAllSongs = true;
+                songList = songRepository.getAllSongs(0);
+                break;
         }
 
         return songList;
@@ -86,12 +96,66 @@ public class SongListPageViewModel extends AndroidViewModel {
                     }
                 });
                 break;
+            case Constants.MEDIA_ALL_SONGS:
+                if (songList == null || !hasMoreAllSongs) return;
+
+                List<Child> loadedAllSongs = songList.getValue();
+
+                // The first page is requested by getSongList(), so the server offset is unknown until
+                // the first scroll: seed it with what has been loaded so far. From then on it advances
+                // by the number of rows actually returned, not by the (deduplicated) list size, so
+                // overlapping pages cannot make it under-shoot and skip songs.
+                if (allSongsServerOffset == 0) {
+                    allSongsServerOffset = loadedAllSongs != null ? loadedAllSongs.size() : 0;
+                }
+
+                int allSongsOffset = allSongsServerOffset;
+
+                songRepository.getAllSongs(allSongsOffset).observe(owner, children -> {
+                    List<Child> currentMedia = songList.getValue();
+                    List<Child> merged = new ArrayList<>(currentMedia != null ? currentMedia : new ArrayList<>());
+
+                    if (children == null) {
+                        // The request failed: publish the list unchanged so the fragment releases its
+                        // isLoading flag, and leave hasMoreAllSongs untouched so a later scroll retries.
+                        songList.setValue(merged);
+                        return;
+                    }
+
+                    Set<String> knownIds = new HashSet<>();
+                    for (Child child : merged) {
+                        if (child.getId() != null) knownIds.add(child.getId());
+                    }
+
+                    int added = 0;
+
+                    for (Child child : children) {
+                        if (child.getId() == null || knownIds.add(child.getId())) {
+                            merged.add(child);
+                            added++;
+                        }
+                    }
+
+                    allSongsServerOffset = allSongsOffset + children.size();
+                    hasMoreAllSongs = added > 0;
+
+                    songList.setValue(merged);
+                });
+                break;
             case Constants.MEDIA_BY_ARTIST:
             case Constants.MEDIA_BY_GENRES:
             case Constants.MEDIA_BY_YEAR:
             case Constants.MEDIA_STARRED:
                 break;
         }
+    }
+
+    public List<Child> getCurrentSongList() {
+        return songList != null ? songList.getValue() : null;
+    }
+
+    public boolean hasMoreAllSongs() {
+        return hasMoreAllSongs;
     }
 
     public String getFiltersTitle() {
