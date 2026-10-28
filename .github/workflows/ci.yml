@@ -1,0 +1,203 @@
+# CI: pull requests targeting main, pushes to main and manual dispatches.
+#
+# What it validates: that all three product flavors (tempo, notquitemy, play)
+# still compile and package, in debug and in release. The release step covers
+# the R8/minify + shrinkResources path declared in app/build.gradle
+# (buildTypes.release), which is where keep-rule and flavor-specific breakage
+# usually shows up.
+#
+# No repository secrets required. The build job signs nothing: with no keystore
+# configured, :app:assembleRelease falls back to unsigned output (*-unsigned.apk) and
+# still succeeds, so fork PRs run without any access to the signing secrets. The
+# signing-smoke job covers the signed path (signingConfigs.release + AAB signing) with
+# a throwaway keystore it generates in $RUNNER_TEMP, so it needs no secret either.
+#
+# Deliberately absent: tests and lint. The project has no test sources and no
+# lint configuration, so neither gate exists here.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Workflow-level group: one run per ref, and a superseded run is cancelled whole,
+# so it covers every job below (build + signing-smoke) without needing per-job
+# groups that would let a stale signing-smoke outlive the commit it tested.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v6 # v6.4.1
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6 # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6 # v6.4.1
+
+      - name: Build debug APKs (all flavors)
+        run: bash gradlew --no-daemon --console=plain :app:assembleDebug
+
+      # minifyEnabled/shrinkResources are only on for release, so the release
+      # variant is the one that actually exercises proguard + R8. No keystore or
+      # secret is configured here: the build emits *-unsigned.apk and succeeds.
+      - name: Build unsigned release APKs (proguard/R8 path)
+        run: bash gradlew --no-daemon --console=plain :app:assembleRelease
+
+      - name: List produced APKs
+        run: find app/build/outputs/apk -name '*.apk' -printf '%p %k KB\n' | sort
+
+  # Why this job exists: the tag pipeline (.github/workflows/release.yml) is
+  # otherwise the FIRST place the signing branch of app/build.gradle ever runs --
+  # hasReleaseSigning, the resolution of signingConfigs.release and
+  # :app:bundleRelease are all unreachable from the unsigned build job above, so a
+  # signing-config regression would only surface on a real release tag, with the
+  # publish job attached. Here the same path is exercised on every PR with a
+  # throwaway keystore and no repository secret.
+  signing-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v6 # v6.4.1
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6 # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6 # v6.4.1
+
+      - name: Generate throwaway keystore
+        run: |
+          set -euo pipefail
+          keytool -genkeypair -noprompt \
+            -keystore "$RUNNER_TEMP/ci-smoke.jks" -storetype PKCS12 \
+            -storepass cipass123 -keypass cipass123 -alias ci-smoke \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname 'CN=Tempo CI Smoke, O=Tempo, C=US'
+
+      # The same env contract release.yml hands to Gradle after decoding the real
+      # keystore: with all four set, app/build.gradle resolves
+      # signingConfigs.release and attaches it to buildTypes.release. Values reach
+      # the script through `env:` only, never as interpolated runner expressions in
+      # the body. `bash gradlew` because gradlew is committed executable but a
+      # checkout can still lose the bit (core.fileMode=false, Windows).
+      - name: Build signed release artifacts (APK + AAB, all flavors)
+        env:
+          ANDROID_KEYSTORE_FILE: ${{ runner.temp }}/ci-smoke.jks
+          ANDROID_KEYSTORE_PASSWORD: cipass123
+          ANDROID_KEY_ALIAS: ci-smoke
+          ANDROID_KEY_PASSWORD: cipass123
+        run: bash gradlew --no-daemon --console=plain :app:assembleRelease :app:bundleRelease
+
+      - name: Verify every APK is signed
+        env:
+          FLAVORS: tempo notquitemy play
+        run: |
+          set -euo pipefail
+
+          # Newest apksigner on the image (verify is backward compatible). A
+          # missing tool is a hard error: a smoke test that silently skips the
+          # check proves nothing. Final releases win over preview build-tools:
+          # plain `sort -V` ranks `37.0.0-rc1` ABOVE `37.0.0`, so `-rc`/preview
+          # directories are only used as a fallback (same rule as release.yml).
+          sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/Android/Sdk}}"
+          releases=''
+          previews=''
+          for dir in "$sdk_root"/build-tools/*/; do
+            [ -x "${dir}apksigner" ] || continue
+            version="$(basename "${dir%/}")"
+            if [[ "$version" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+              releases+="${version}"$'\t'"${dir}apksigner"$'\n'
+            else
+              previews+="${version}"$'\t'"${dir}apksigner"$'\n'
+            fi
+          done
+          newest_entry() {
+            sort -V | tail -n 1 | cut -f 2
+          }
+          apksigner="$(printf '%s' "$releases" | newest_entry || true)"
+          if [ -z "$apksigner" ]; then
+            apksigner="$(printf '%s' "$previews" | newest_entry || true)"
+          fi
+          if [ -z "$apksigner" ] || [ ! -f "$apksigner" ]; then
+            echo "::error::apksigner not found under $sdk_root/build-tools/*/apksigner"
+            exit 1
+          fi
+          echo "Using $apksigner"
+
+          status=0
+          for flavor in $FLAVORS; do
+            apk_dir="app/build/outputs/apk/$flavor/release"
+            apk="$apk_dir/app-$flavor-release.apk"
+            unsigned_apk="$apk_dir/app-$flavor-release-unsigned.apk"
+            aab="app/build/outputs/bundle/${flavor}Release/app-$flavor-release.aab"
+
+            # The whole point of the job: with signing material present Gradle
+            # must NOT fall back to the unsigned artifact.
+            if [ -f "$unsigned_apk" ]; then
+              echo "::error::[$flavor] Gradle produced $unsigned_apk - the release signingConfig was not applied"
+              status=1
+            fi
+
+            if [ ! -f "$apk" ]; then
+              echo "::error::[$flavor] signed apk missing: $apk"
+              status=1
+            else
+              echo "===== [$flavor] verifying $apk ====="
+              if "$apksigner" verify --print-certs "$apk"; then
+                echo "===== [$flavor] signature OK ====="
+              else
+                echo "::error::[$flavor] apksigner verify FAILED for $apk"
+                status=1
+              fi
+            fi
+
+            # An AAB keeps its filename whether or not it is signed (the
+            # `-unsigned` suffix only applies to APK filenames), so existence is
+            # not enough: assert the JAR signature block Gradle writes into a
+            # signed bundle. The APK checks above already catch the same
+            # regression; this one makes the claim about bundles true.
+            if [ ! -f "$aab" ]; then
+              echo "::error::[$flavor] bundle missing: $aab"
+              status=1
+            elif unzip -l "$aab" | grep -qE 'META-INF/.*\.(RSA|EC|DSA)$'; then
+              echo "[$flavor] bundle present and signed: $aab"
+            else
+              echo "::error::[$flavor] bundle has no signer block (unsigned AAB): $aab"
+              status=1
+            fi
+          done
+
+          if [ "$status" -ne 0 ]; then
+            echo "::error::Signing smoke test failed - see the per-flavor errors above."
+          fi
+          exit "$status"

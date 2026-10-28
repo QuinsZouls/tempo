@@ -1,0 +1,604 @@
+# =============================================================================
+# Tempo - signed release build + GitHub Release
+#
+# -----------------------------------------------------------------------------
+# Secrets required (repository secrets, exact names; the app reads them as env):
+#   ANDROID_KEYSTORE_BASE64     base64 of the .jks/.keystore file (may contain
+#                               newlines - they are tolerated by the decoder)
+#   ANDROID_KEYSTORE_PASSWORD
+#   ANDROID_KEY_ALIAS
+#   ANDROID_KEY_PASSWORD
+# These map 1:1 onto the env contract consumed by app/build.gradle
+# (ANDROID_KEYSTORE_FILE / ANDROID_KEYSTORE_PASSWORD / ANDROID_KEY_ALIAS /
+# ANDROID_KEY_PASSWORD, env wins over a local keystore.properties).
+# See RELEASING.md for how to create and rotate the keystore.
+#
+# -----------------------------------------------------------------------------
+# How to cut a release:
+#   1. Bump `versionCode` and `versionName` in app/build.gradle (defaultConfig).
+#   2. Add fastlane/metadata/android/en-US/changelogs/<versionCode>.txt
+#      (F-Droid style, one file per versionCode). Missing file => the release
+#      body falls back to GitHub's auto-generated release notes.
+#   3. git tag <versionName> && git push origin <versionName>   # e.g. `git tag 3.10.0`
+#      `v3.10.0` also works: the leading "v" is stripped before comparison.
+#      Push the single tag, not `--tags`, and pick a version this fork has not
+#      released yet - see the "Bump before tagging" warning in RELEASING.md.
+#   4. The Resolve version step fails the build job when the tag and the
+#      versionName in the tree disagree, so a mislabelled release cannot be
+#      published.
+#
+# -----------------------------------------------------------------------------
+# Dry run (workflow_dispatch on a BRANCH ref, no inputs):
+#   Runs the whole build/cache/artifact path WITHOUT publishing anything: the
+#   `release` job is tag-gated, so a dispatch run targeting a branch never
+#   publishes. Dispatching on a TAG ref (`gh workflow run release.yml --ref
+#   <tag>`) does publish for that tag, which is the intended way to re-run a
+#   failed release.
+#   If the signing secrets are absent the artifacts stay unsigned and the run
+#   still succeeds: the verify step prints a loud ::warning:: per flavor and
+#   skips signature verification (there is nothing to verify). It is on a *tag*
+#   run that missing signing material is a hard error, not a warning.
+#
+# Notes on the build itself: Gradle 8.10.2 comes from
+# gradle/wrapper/gradle-wrapper.properties; the committed gradle-wrapper.jar is
+# an older official jar (4.6-era), so gradle/actions/wrapper-validation only
+# proves it is an official jar - not that it matches 8.10.2 - and it does work.
+# Regenerating it with `gradle wrapper --gradle-version 8.10.2` is a known
+# follow-up. JDK 17. `gradlew` is committed executable (mode 755); it is still
+# invoked as `bash gradlew` so a checkout that dropped the bit
+# (core.fileMode=false, Windows) works too. Minification/shrinking stays on.
+# =============================================================================
+name: Release
+
+on:
+  push:
+    # Glob (not regex). The legacy '[0-9]+.[0-9]+.[0-9]+' was indeed a glob, and
+    # it DID match: `+` means "one or more of the preceding character", so
+    # `3.9.0` passed the filter. That workflow was dead for other reasons - it
+    # built only the `tempo` flavor, signed post-hoc with the archived
+    # r0adkll/sign-android-release@v1, published with the archived
+    # actions/create-release@v1 + actions/upload-release-asset@v1, never built
+    # AABs, and its tag_name was the whole ref (refs/tags/3.9.0) instead of the
+    # tag name. `*.*.*` is kept because it is plain and unambiguous: it matches
+    # `3.9.0` and `v3.9.0`.
+    tags:
+      - '*.*.*'
+  # Manual trigger. Intentionally has no inputs: there is nothing to get wrong,
+  # and publishing is gated by the ref the run starts on - dispatching a branch
+  # is a dry run, dispatching a tag re-publishes that tag.
+  workflow_dispatch:
+
+# Least privilege for the build job (it only reads the repo and writes artifacts
+# through upload-artifact); `contents: write` is granted on the `release` job
+# alone, which is the only one that creates a GitHub Release.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  # Never cancel an in-flight release: a half-published release is worse than a
+  # duplicate one.
+  cancel-in-progress: false
+
+env:
+  # Product flavors of the "default" dimension, kept in one place so the build,
+  # verify and staging steps cannot drift apart.
+  FLAVORS: tempo notquitemy play
+  APK_OUTPUT_DIR: app/build/outputs/apk
+  BUNDLE_OUTPUT_DIR: app/build/outputs/bundle
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v6 # v6.4.1
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6 # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Owns the Gradle caches (wrapper distribution, build cache, artifacts);
+      # a hand-rolled actions/cache step would fight with it, so there is none.
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v6 # v6.4.1
+
+      # ---------------------------------------------------------------------
+      # Version resolution + tag/version consistency guard.
+      # GITHUB_REF / GITHUB_REF_NAME are read from the runner environment
+      # instead of `${{ }}` interpolation: tag names are attacker-controllable
+      # text, and this keeps the script injection-free.
+      # ---------------------------------------------------------------------
+      - name: Resolve version
+        id: meta
+        run: |
+          set -euo pipefail
+
+          GRADLE_FILE='app/build.gradle'
+          if [ ! -f "$GRADLE_FILE" ]; then
+            echo "::error::$GRADLE_FILE not found - cannot read versionName/versionCode."
+            exit 1
+          fi
+
+          # versionName/versionCode are read from the `defaultConfig { ... }`
+          # block ONLY - never from the whole file. Why the scope matters: a
+          # `grep -m1` over app/build.gradle also hits decoys, e.g. a commented
+          # `/* versionName '3.8.0' */` above defaultConfig, or the
+          # `versionNameSuffix` / `versionCodeOverride` of a product flavor, and
+          # the release would then be labelled with a version nobody built (and
+          # the tag check below would compare against that wrong value).
+          # The block is cut with brace counting, not "stop at the first }",
+          # because defaultConfig nests braces (annotationProcessorOptions {
+          # arguments { ... } } inside javaCompileOptions { ... }).
+          DEFAULT_CONFIG="$(
+            awk 'BEGIN { depth = 0 }
+                 /^[[:space:]]*defaultConfig[[:space:]]*\{/ { inside = 1 }
+                 inside {
+                   print
+                   opens  = gsub(/\{/, "{")
+                   closes = gsub(/\}/, "}")
+                   depth += opens - closes
+                   if (depth <= 0) exit
+                 }' "$GRADLE_FILE"
+          )"
+          if [ -z "$DEFAULT_CONFIG" ]; then
+            echo "::error::No defaultConfig { ... } block found in $GRADLE_FILE - cannot read versionName/versionCode."
+            exit 1
+          fi
+
+          # Echo the literal value of a Groovy key, read from stdin (the block
+          # above). Handles `key 'v'`, `key = 'v'`, `key "v"`, `key = 26` and
+          # trailing `// comments`; prints nothing when the key is absent.
+          gradle_literal() {
+            local key="$1" line value
+            line="$(grep -m1 -E "^[[:space:]]*${key}([[:space:]]*=)?[[:space:]]*[^[:space:]]" || true)"
+            [ -n "$line" ] || return 0
+            value="${line#*"$key"}"
+            value="${value#*=}"
+            value="${value%%//*}"
+            printf '%s' "$value" | tr -d '="'"'"', \t'
+          }
+
+          # `|| true`: grep -m1 stops early, so the feeding printf may hit
+          # SIGPIPE; an absent/garbage value is caught by the checks below.
+          VERSION_NAME="$(printf '%s\n' "$DEFAULT_CONFIG" | gradle_literal versionName || true)"
+          VERSION_CODE="$(printf '%s\n' "$DEFAULT_CONFIG" | gradle_literal versionCode || true)"
+
+          if ! printf '%s' "$VERSION_NAME" | grep -qE '^[0-9]+(\.[0-9]+)+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::Could not parse versionName from $GRADLE_FILE (got: '${VERSION_NAME}'). Expected a dotted version such as 3.9.0."
+            exit 1
+          fi
+          if ! printf '%s' "$VERSION_CODE" | grep -qE '^[0-9]+$'; then
+            echo "::error::Could not parse versionCode from $GRADLE_FILE (got: '${VERSION_CODE}'). Expected an integer."
+            exit 1
+          fi
+
+          # Guard: a tag must describe the version that is actually in the tree,
+          # otherwise the release ships mislabelled binaries.
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG_VERSION="${GITHUB_REF_NAME#v}"
+            if [ "$TAG_VERSION" != "$VERSION_NAME" ]; then
+              # Both sides can be the mistake, so the message says so instead of
+              # only telling the author to bump versionName.
+              echo "::error::Tag '${GITHUB_REF_NAME}' means version '${TAG_VERSION}', but $GRADLE_FILE has versionName '${VERSION_NAME}'. Either the tag is wrong or versionName is: if the tag is the mistake, delete or move it (git tag -d '${GITHUB_REF_NAME}' && git push --delete '${GITHUB_REF_NAME}', then tag the right version); otherwise bump versionName and versionCode (plus a fastlane changelog file) to '${TAG_VERSION}' and re-tag. Refusing to publish a mislabelled release."
+              exit 1
+            fi
+            echo "Tag '${GITHUB_REF_NAME}' matches versionName '${VERSION_NAME}'."
+          else
+            echo "Not a tag run - skipping the tag/version consistency check."
+          fi
+
+          {
+            echo "version=$VERSION_NAME"
+            echo "version_code=$VERSION_CODE"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Resolved version=${VERSION_NAME} (versionCode=${VERSION_CODE})"
+
+      # ---------------------------------------------------------------------
+      # Signing preflight. Only booleans and *names* are ever printed; the
+      # secret values are never echoed and never written to a log line.
+      # ---------------------------------------------------------------------
+      - name: Check signing material
+        id: signing
+        env:
+          KEYSTORE_B64: '${{ secrets.ANDROID_KEYSTORE_BASE64 }}'
+          KEYSTORE_PASSWORD: '${{ secrets.ANDROID_KEYSTORE_PASSWORD }}'
+          KEY_ALIAS: '${{ secrets.ANDROID_KEY_ALIAS }}'
+          KEY_PASSWORD: '${{ secrets.ANDROID_KEY_PASSWORD }}'
+        run: |
+          set -euo pipefail
+
+          has_signing=true
+          missing=''
+          for name in KEYSTORE_B64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              has_signing=false
+              missing="$missing $name"
+            fi
+          done
+
+          echo "has_signing=$has_signing" >> "$GITHUB_OUTPUT"
+
+          if [ "$has_signing" = true ]; then
+            echo "All four signing secrets are present."
+            exit 0
+          fi
+
+          # `$missing` holds secret *names* (not values), safe to display.
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "::error::Release signing secrets are missing (unset:${missing}). A tag run must produce signed artifacts. Add ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD to the repository secrets - see RELEASING.md."
+            exit 1
+          fi
+
+          echo "::warning::Dry run: signing secrets are unset (${missing}), release artifacts will be UNSIGNED and no GitHub Release will be created."
+
+      - name: Decode keystore
+        if: steps.signing.outputs.has_signing == 'true'
+        env:
+          KEYSTORE_B64: '${{ secrets.ANDROID_KEYSTORE_BASE64 }}'
+          KEYSTORE_PASSWORD: '${{ secrets.ANDROID_KEYSTORE_PASSWORD }}'
+          KEY_ALIAS: '${{ secrets.ANDROID_KEY_ALIAS }}'
+          KEY_PASSWORD: '${{ secrets.ANDROID_KEY_PASSWORD }}'
+        run: |
+          set -euo pipefail
+          umask 077
+
+          keystore_dir="$RUNNER_TEMP/signing"
+          keystore_path="$keystore_dir/release.jks"
+          mkdir -p "$keystore_dir"
+
+          # printf (not echo) + `base64 --decode`: the secret may legitimately
+          # contain newlines, which base64 --decode tolerates.
+          if ! printf '%s' "$KEYSTORE_B64" | base64 --decode > "$keystore_path"; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 is not valid base64 - cannot decode the keystore."
+            exit 1
+          fi
+          if [ ! -s "$keystore_path" ]; then
+            echo "::error::Decoded keystore is empty ($keystore_path) - ANDROID_KEYSTORE_BASE64 looks truncated or wrong."
+            exit 1
+          fi
+
+          # Hand the Gradle signing contract to the following steps. Values are
+          # written verbatim into $GITHUB_ENV (never echoed); this assumes the
+          # passwords contain no newlines. $RUNNER_TEMP is wiped after the job.
+          {
+            echo "ANDROID_KEYSTORE_FILE=$keystore_path"
+            echo "ANDROID_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+            echo "ANDROID_KEY_ALIAS=$KEY_ALIAS"
+            echo "ANDROID_KEY_PASSWORD=$KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+          echo "Keystore decoded to $keystore_path ($(wc -c < "$keystore_path") bytes, mode $(stat -c '%a' "$keystore_path"))."
+
+      - name: Build release artifacts
+        run: |
+          set -euo pipefail
+          # `bash gradlew`: gradlew is committed with mode 755, but going through
+          # bash also covers a checkout that dropped the executable bit
+          # (core.fileMode=false, or a Windows working copy).
+          bash gradlew --no-daemon --console=plain :app:assembleRelease :app:bundleRelease
+
+      # ---------------------------------------------------------------------
+      # Second opinion on the version: compare the `meta` outputs against what
+      # Gradle itself recorded for every variant. The tag guard above can only
+      # prove that the shell parser read the same value twice; this proves the
+      # value matches the bytes that were actually baked into the APKs, so a
+      # parser that disagrees with the build stops the pipeline here. Distinct
+      # from the signature check below: failure here means "wrong version
+      # label", failure there means "wrong or missing signature".
+      # ---------------------------------------------------------------------
+      - name: Cross-check built versions against Gradle output metadata
+        env:
+          GRADLE_FILE: 'app/build.gradle'
+          VERSION: '${{ steps.meta.outputs.version }}'
+          VERSION_CODE: '${{ steps.meta.outputs.version_code }}'
+        run: |
+          set -euo pipefail
+
+          # First `"key": value` scalar of the JSON file, without depending on jq:
+          # output-metadata.json describes a single variant, so one match is all
+          # there is (quotes stripped, numbers kept). `[ \t]` instead of a POSIX
+          # class keeps this portable across the awks on the runner image.
+          json_scalar() {
+            local key="$1" file="$2"
+            awk -v key="$key" '{
+                  if (match($0, "\"" key "\"[ \t]*:[ \t]*[^, \t]+")) {
+                    value = substr($0, RSTART, RLENGTH)
+                    sub("^\"" key "\"[ \t]*:[ \t]*", "", value)
+                    gsub(/"/, "", value)
+                    print value
+                    exit
+                  }
+                }' "$file"
+          }
+
+          status=0
+          for flavor in $FLAVORS; do
+            metadata="$APK_OUTPUT_DIR/$flavor/release/output-metadata.json"
+            if [ ! -f "$metadata" ]; then
+              echo "::error::[$flavor] $metadata missing - cannot prove which version Gradle actually built."
+              status=1
+              continue
+            fi
+
+            built_name="$(json_scalar versionName "$metadata")"
+            built_code="$(json_scalar versionCode "$metadata")"
+            if [ -z "$built_name" ] || [ -z "$built_code" ]; then
+              echo "::error::[$flavor] could not read versionName/versionCode from $metadata (got versionName='${built_name}' versionCode='${built_code}')."
+              status=1
+              continue
+            fi
+            if [ "$built_name" != "$VERSION" ] || [ "$built_code" != "$VERSION_CODE" ]; then
+              echo "::error::[$flavor] version mismatch: Gradle built versionName '${built_name}' (versionCode ${built_code}) but the workflow resolved versionName '${VERSION}' (versionCode ${VERSION_CODE}) from $GRADLE_FILE. The parser and the build disagree - refusing to ship or publish these artifacts."
+              status=1
+              continue
+            fi
+
+            echo "[$flavor] Gradle baked in ${built_name} (${built_code}), matches the resolved version."
+          done
+
+          if [ "$status" -ne 0 ]; then
+            echo "::error::Version cross-check failed - see the per-flavor errors above."
+          fi
+          exit "$status"
+
+      # ---------------------------------------------------------------------
+      # Safety net: a release must never ship an unsigned or unverifiable
+      # artifact. This is the step that would catch a silent signing-config
+      # regression (e.g. Gradle falling back to `*-unsigned.apk`).
+      # ---------------------------------------------------------------------
+      - name: Verify signed artifacts
+        env:
+          HAS_SIGNING: '${{ steps.signing.outputs.has_signing }}'
+        run: |
+          set -euo pipefail
+
+          # Fail closed: only an explicit 'false' from the preflight (dry run
+          # without signing material) may skip signature verification. Anything
+          # else - including a missing/empty output - is treated as "there is a
+          # signature and it must verify".
+          if [ "$HAS_SIGNING" = 'false' ]; then
+            HAS_SIGNING=false
+          else
+            HAS_SIGNING=true
+          fi
+
+          # The apksigner hunt only matters when there is a signature to check:
+          # a secret-less dry run must not fail because of a missing tool.
+          apksigner=''
+          if [ "$HAS_SIGNING" = 'true' ]; then
+            sdk_root="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+            if [ -z "$sdk_root" ]; then
+              echo "::error::Neither ANDROID_SDK_ROOT nor ANDROID_HOME is set; cannot locate apksigner."
+              exit 1
+            fi
+
+            # Newest apksigner by VERSION sort (any apksigner is backward
+            # compatible for `verify`, the choice only decides which one we use).
+            # The old loop simply kept the last match of an unsorted glob, i.e.
+            # the lexicographic maximum, and plain `sort -V` has the same blind
+            # spot: it ranks `37.0.0-rc1` AFTER `37.0.0`. So final releases
+            # (digits and dots only) are collected first and preview build-tools
+            # are only a fallback for images that have nothing else.
+            releases=''
+            previews=''
+            for dir in "$sdk_root"/build-tools/*/; do
+              [ -x "${dir}apksigner" ] || continue
+              version="$(basename "${dir%/}")"
+              if [[ "$version" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+                releases+="${version}"$'\t'"${dir}apksigner"$'\n'
+              else
+                previews+="${version}"$'\t'"${dir}apksigner"$'\n'
+              fi
+            done
+
+            # stdin: "<version>\t<path>" lines -> path of the highest version.
+            newest_entry() {
+              sort -V | tail -n 1 | cut -f 2
+            }
+
+            apksigner="$(printf '%s' "$releases" | newest_entry || true)"
+            if [ -z "$apksigner" ]; then
+              apksigner="$(printf '%s' "$previews" | newest_entry || true)"
+            fi
+            if [ -z "$apksigner" ]; then
+              echo "::error::apksigner not found under $sdk_root/build-tools/* (no build-tools package installed on this image)."
+              exit 1
+            fi
+            echo "Using $apksigner"
+          fi
+
+          status=0
+          for flavor in $FLAVORS; do
+            apk_dir="$APK_OUTPUT_DIR/$flavor/release"
+            apk="$apk_dir/app-$flavor-release.apk"
+            unsigned_apk="$apk_dir/app-$flavor-release-unsigned.apk"
+            aab="$BUNDLE_OUTPUT_DIR/${flavor}Release/app-$flavor-release.aab"
+
+            if [ "$HAS_SIGNING" = 'true' ]; then
+              if [ ! -f "$apk" ]; then
+                if [ -f "$unsigned_apk" ]; then
+                  echo "::error::[$flavor] Gradle only produced the UNSIGNED apk ($unsigned_apk): the release signingConfig was not applied."
+                else
+                  echo "::error::[$flavor] signed apk missing: $apk"
+                fi
+                status=1
+              elif [[ "$apk" == *unsigned* ]]; then
+                # Unreachable by construction, kept as a tripwire.
+                echo "::error::[$flavor] refusing to treat '$apk' as the signed artifact."
+                status=1
+              else
+                echo "===== [$flavor] verifying $apk ====="
+                if "$apksigner" verify --print-certs "$apk"; then
+                  echo "===== [$flavor] signature OK ====="
+                else
+                  echo "::error::[$flavor] apksigner verify FAILED for $apk"
+                  status=1
+                fi
+              fi
+            else
+              # Dry run only: assert something was produced, but never claim it
+              # is signed.
+              if [ -f "$apk" ]; then
+                echo "::warning::[$flavor] $apk built without signing material - do not distribute."
+              elif [ -f "$unsigned_apk" ]; then
+                echo "::warning::[$flavor] unsigned apk ($unsigned_apk) - dry run, no verification possible."
+              else
+                echo "::error::[$flavor] no release apk found in $apk_dir"
+                status=1
+              fi
+            fi
+
+            # Bundles are asserted in both modes (AABs keep their name whether
+            # or not they carry a signature block, so apksigner is not used).
+            if [ -f "$aab" ]; then
+              echo "[$flavor] bundle present: $aab"
+            else
+              echo "::error::[$flavor] bundle missing: $aab"
+              status=1
+            fi
+          done
+
+          if [ "$status" -ne 0 ]; then
+            echo "::error::Artifact verification failed - see the per-flavor errors above."
+          fi
+          exit "$status"
+
+      - name: Stage artifacts
+        env:
+          VERSION: '${{ steps.meta.outputs.version }}'
+          HAS_SIGNING: '${{ steps.signing.outputs.has_signing }}'
+        run: |
+          set -euo pipefail
+
+          rm -rf dist
+          mkdir -p dist
+
+          for flavor in $FLAVORS; do
+            apk_dir="$APK_OUTPUT_DIR/$flavor/release"
+            # The signed name always wins; the `-unsigned` candidate is only
+            # reached on an unsigned dry run.
+            apk=''
+            for candidate in "app-$flavor-release.apk" "app-$flavor-release-unsigned.apk"; do
+              if [ -f "$apk_dir/$candidate" ]; then
+                apk="$apk_dir/$candidate"
+                break
+              fi
+            done
+            if [ -z "$apk" ]; then
+              echo "::error::[$flavor] nothing to stage under $apk_dir"
+              exit 1
+            fi
+            if [ "$HAS_SIGNING" = 'true' ] && [[ "$apk" == *unsigned* ]]; then
+              echo "::error::[$flavor] staged artifact is unsigned: $apk"
+              exit 1
+            fi
+
+            aab="$BUNDLE_OUTPUT_DIR/${flavor}Release/app-$flavor-release.aab"
+            if [ ! -f "$aab" ]; then
+              echo "::error::[$flavor] nothing to stage: $aab"
+              exit 1
+            fi
+
+            cp "$apk" "dist/tempo-v${VERSION}-${flavor}.apk"
+            cp "$aab" "dist/tempo-v${VERSION}-${flavor}.aab"
+          done
+
+          ls -l dist
+
+      # Artifact names tell the truth about their content: `apk-signed` /
+      # `aab-signed` only when the run had signing material (the same condition
+      # that gates apksigner verification above), `apk-unsigned` / `aab-unsigned`
+      # on a secret-less dry run, so nobody mistakes a dry-run download for a
+      # distributable build. AABs are signed by Gradle itself when a signingConfig
+      # is present - they keep their filename either way, hence the same switch.
+      # RELEASING.md documents both names. The GitHub Release *assets* are the
+      # staged files above, renamed to `tempo-v<version>-<flavor>.apk`.
+      - name: Upload APKs
+        uses: actions/upload-artifact@v7 # v7.0.2
+        with:
+          name: ${{ steps.signing.outputs.has_signing == 'true' && 'apk-signed' || 'apk-unsigned' }}
+          path: dist/*.apk
+          if-no-files-found: error
+
+      - name: Upload AABs
+        uses: actions/upload-artifact@v7 # v7.0.2
+        with:
+          name: ${{ steps.signing.outputs.has_signing == 'true' && 'aab-signed' || 'aab-unsigned' }}
+          path: dist/*.aab
+          if-no-files-found: error
+
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      version_code: ${{ steps.meta.outputs.version_code }}
+
+  release:
+    needs: build
+    # A custom `if` replaces the implicit "all needed jobs succeeded" check, so
+    # success() is spelled out. Publishing is tag-gated: a dispatch run targeting
+    # a BRANCH never gets here, while dispatching on a TAG ref
+    # (`gh workflow run release.yml --ref <tag>`) publishes for that tag - the
+    # intended way to re-run a release that failed after the build.
+    if: success() && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      # Both artifacts land flat in dist/ thanks to merge-multiple, so the
+      # `dist/*.apk` glob below sees the three APKs.
+      - name: Download artifacts
+        uses: actions/download-artifact@v8 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: 'true'
+
+      - name: Collect release notes
+        id: notes
+        env:
+          VERSION_CODE: '${{ needs.build.outputs.version_code }}'
+        run: |
+          set -euo pipefail
+
+          changelog="fastlane/metadata/android/en-US/changelogs/${VERSION_CODE}.txt"
+          if [ -f "$changelog" ]; then
+            echo "changelog_path=$changelog" >> "$GITHUB_OUTPUT"
+            echo "has_changelog=true" >> "$GITHUB_OUTPUT"
+            echo "Using release notes from $changelog:"
+            cat "$changelog"
+          else
+            # Empty body_path is ignored by the release action, which then
+            # falls back to generate_release_notes.
+            echo "changelog_path=" >> "$GITHUB_OUTPUT"
+            echo "has_changelog=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No changelog for versionCode ${VERSION_CODE} - adding fastlane/metadata/android/en-US/changelogs/${VERSION_CODE}.txt is the repo convention; using generated notes instead."
+          fi
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3 # v3.0.3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: v${{ needs.build.outputs.version }}
+          # APKs only. The AABs stay as workflow artifacts: they are the Google
+          # Play upload format, not something users download from a release.
+          files: dist/*.apk
+          body_path: ${{ steps.notes.outputs.changelog_path }}
+          generate_release_notes: ${{ steps.notes.outputs.has_changelog != 'true' }}
+          draft: false
+          # Tags like 3.9.0-beta1 -> prerelease; plain 3.9.0 -> latest.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: 'true'
