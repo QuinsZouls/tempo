@@ -13,3 +13,13 @@
 .externalNativeBuild
 .cxx
 /.idea/
+
+# Release signing material — never commit these
+*.jks
+*.keystore
+keystore.properties
+# base64-encoded keystore, as produced by the RELEASING.md instructions
+keystore.b64
+
+# Local staging dir used by .github/workflows/release.yml
+/dist/
