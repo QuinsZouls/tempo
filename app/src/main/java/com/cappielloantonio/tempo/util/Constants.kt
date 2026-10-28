@@ -75,6 +75,7 @@ object Constants {
     const val MEDIA_BY_ARTIST = "MEDIA_BY_ARTIST"
     const val MEDIA_BY_YEAR = "MEDIA_BY_YEAR"
     const val MEDIA_STARRED = "MEDIA_STARRED"
+    const val MEDIA_ALL_SONGS = "MEDIA_ALL_SONGS"
     const val MEDIA_DOWNLOADED = "MEDIA_DOWNLOADED"
     const val MEDIA_FROM_ALBUM = "MEDIA_FROM_ALBUM"
     const val MEDIA_MIX = "MEDIA_MIX"

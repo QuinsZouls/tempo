@@ -28,4 +28,9 @@ public class SearchingClient {
         Log.d(TAG, "search3()");
         return searchingService.search3(subsonic.getParams(), query, songCount, albumCount, artistCount);
     }
+
+    public Call<ApiResponse> search3(String query, int songCount, int songOffset, int albumCount, int artistCount) {
+        Log.d(TAG, "search3()");
+        return searchingService.search3(subsonic.getParams(), query, songCount, songOffset, albumCount, artistCount);
+    }
 }

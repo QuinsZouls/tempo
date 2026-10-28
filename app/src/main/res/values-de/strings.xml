@@ -140,6 +140,7 @@
     <string name="home_title_starred_tracks_see_all_button">Alle zeigen</string>
     <string name="home_title_top_songs">Deine Top Songs</string>
     <string name="home_option_reorganize">Neu anordnen</string>
+    <string name="library_title_all_songs">Alle Titel</string>
     <string name="library_title_album">Alben</string>
     <string name="library_title_album_see_all_button">Alle zeigen</string>
     <string name="library_title_artist">Künstler</string>
@@ -361,6 +362,7 @@
     <string name="song_bottom_sheet_play_next">Nächsten Titel spielen</string>
     <string name="song_bottom_sheet_rate">Bewerten</string>
     <string name="song_bottom_sheet_remove">Entfernen</string>
+    <string name="song_list_page_all_songs">Alle Titel</string>
     <string name="song_list_page_downloaded">Heruntergeladen</string>
     <string name="song_list_page_most_played">Oft gespielte Tracks</string>
     <string name="song_list_page_recently_added">Zuletzt hinzugefügte Tracks</string>

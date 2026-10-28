@@ -142,6 +142,7 @@
 	<string name="home_option_reorganize">Riorganizza</string>
 	<string name="label_dot_separator" translatable="false">•</string>
 	<string name="label_placeholder" translatable="false">--</string>
+	<string name="library_title_all_songs">Tutti i brani</string>
 	<string name="library_title_album">Album</string>
 	<string name="library_title_album_see_all_button">Vedi tutto</string>
 	<string name="library_title_artist">Artisti</string>
@@ -364,6 +365,7 @@
 	<string name="song_bottom_sheet_rate">Valuta</string>
 	<string name="song_bottom_sheet_remove">Rimuovi</string>
 	<string name="song_bottom_sheet_share">Condividi</string>
+	<string name="song_list_page_all_songs">Tutti i brani</string>
 	<string name="song_list_page_downloaded">Scaricato</string>
 	<string name="song_list_page_most_played">Tracce più riprodotte</string>
 	<string name="song_list_page_recently_added">Tracce aggiunte di recente</string>

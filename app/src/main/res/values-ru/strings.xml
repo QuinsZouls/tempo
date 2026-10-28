@@ -139,6 +139,7 @@
     <string name="home_title_starred_tracks_see_all_button">Увидеть все</string>
     <string name="home_title_top_songs">Ваши лучшие треки</string>
     <string name="home_option_reorganize">Реорганизовать</string>
+    <string name="library_title_all_songs">Все треки</string>
     <string name="library_title_album">Альбомы</string>
     <string name="library_title_album_see_all_button">Увидеть все</string>
     <string name="library_title_artist">Исполнители</string>
@@ -356,6 +357,7 @@
     <string name="song_bottom_sheet_rate">Оценить</string>
     <string name="song_bottom_sheet_remove">Удалить</string>
     <string name="song_bottom_sheet_share">Поделиться</string>
+    <string name="song_list_page_all_songs">Все треки</string>
     <string name="song_list_page_downloaded">Загружено</string>
     <string name="song_list_page_most_played">Самые популярные треки</string>
     <string name="song_list_page_recently_added">Недавно добавленные треки</string>
